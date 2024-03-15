@@ -3,24 +3,9 @@ import { recurse } from "../utils";
 
 type CommonObject = Record<PropertyKey, any>;
 
-export interface TreeChainNode<T extends CommonObject = any> {
-	key: PropertyKey;
-	source: T;
-	isLeaf: boolean;
-	parentNode?: TreeChainNode<T>;
-	prevNode?: TreeChainNode<T>;
-	nextNode?: TreeChainNode<T>;
-	siblingNode?: TreeChainNode<T>;
-	children?: TreeChainNode<T>[];
-}
-
-export interface TreeChainDetail<T extends CommonObject> {
-	keys: PropertyKey[];
-	nodes: TreeChainNode<T>[];
-	siblingNodes: TreeChainNode<T>[];
+export interface TreeChainNodeDetail<T extends CommonObject> {
 	tailNode: TreeChainNode<T>;
-	topNode: TreeChainNode<T>;
-	map: Map<PropertyKey, TreeChainNode<T>>;
+	includeNodes: TreeChainNode<T>[];
 }
 
 export interface ConfigCreateTreeChain {
@@ -35,10 +20,8 @@ type FilterFn<Data extends CommonObject> = (data: TreeChainNode<Data>) => boolea
 export interface ConfigToArray<Data extends CommonObject> {
 	filter?: FilterFn<Data>;
 	sort?: SortFn<Data>;
-	area?: {
-		key: PropertyKey;
-		count: number;
-	};
+	startKey?: PropertyKey;
+	count?: number;
 }
 
 const DEFAULT_CONFIGCREATE: ConfigCreateTreeChain = {
@@ -50,287 +33,670 @@ function isPropertyKey(key: any): key is PropertyKey {
 	return typeof key === "string" || !Number.isNaN(key) || typeof key === "symbol";
 }
 
+export class TreeChainNode<Data extends CommonObject> {
+	key: PropertyKey = "";
+	prevNode?: TreeChainNode<Data>;
+	nextNode?: TreeChainNode<Data>;
+	parentNode?: TreeChainNode<Data>;
+	siblingPrevNode?: TreeChainNode<Data>;
+	siblingNextNode?: TreeChainNode<Data>;
+	childNodes: TreeChainNode<Data>[] = [];
+
+	detachCallbacks: ((node: TreeChainNode<Data>) => {})[] = [];
+	InsertCallbacks: ((node: TreeChainNode<Data>) => {})[] = [];
+	destroyCallbacks: ((node: TreeChainNode<Data>) => {})[] = [];
+
+	protected _includeNodes: TreeChainNode<Data>[] = [];
+	get includeNodes() {
+		this._includeNodes.length = 0;
+
+		this.each((node) => {
+			this._includeNodes.push(node);
+		});
+
+		return this._includeNodes;
+	}
+
+	get tail() {
+		let tailNode: TreeChainNode<Data> = this;
+
+		while (tailNode.childNodes.length > 0) {
+			tailNode = tailNode.childNodes[tailNode.childNodes.length - 1];
+		}
+
+		return tailNode;
+	}
+
+	get leaf() {
+		return this.childNodes.length === 0;
+	}
+
+	get level() {
+		let num = 0;
+
+		let parent = this.parentNode;
+
+		while (parent) {
+			parent = parent.parentNode;
+			num++;
+		}
+
+		return num;
+	}
+
+	constructor(public data: Data | null = null, keyName: PropertyKey = "id") {
+		if (!data) return;
+		if (!isPropertyKey(keyName)) {
+			throw new Error(ERROR_PREFIX + `Invalid key name "${String(keyName)}" in data.`);
+		}
+		if (!isPropertyKey(data[keyName])) {
+			throw new Error(ERROR_PREFIX + `Invalid key "${String(data[keyName])}" in data.`);
+		}
+		this.key = data[keyName];
+	}
+
+	protected takeDetachCallbacks() {
+		this.detachCallbacks.forEach((cb) => cb(this));
+	}
+
+	protected takeInsertCallbacks() {
+		this.InsertCallbacks.forEach((cb) => cb(this));
+	}
+
+	protected takeDestroyCallbacks() {
+		this.destroyCallbacks.forEach((cb) => cb(this));
+	}
+
+	onDetach(callback: (node: TreeChainNode<Data>) => {}) {
+		this.detachCallbacks.push(callback);
+	}
+	onInsert(callback: (node: TreeChainNode<Data>) => {}) {
+		this.InsertCallbacks.push(callback);
+	}
+	onDestroy(callback: (node: TreeChainNode<Data>) => {}) {
+		this.destroyCallbacks.push(callback);
+	}
+
+	each(
+		callback: (
+			node: TreeChainNode<Data>,
+			index: number,
+			parent?: TreeChainNode<Data>
+		) => false | void
+	) {
+		const node = this as TreeChainNode<Data>;
+		recurse([node], "childNodes", (_node, index, parent, native) =>
+			callback(native, index, parent)
+		);
+
+		return this;
+	}
+
+	clean() {
+		this.prevNode = void 0;
+		this.nextNode = void 0;
+		this.parentNode = void 0;
+		this.childNodes = [];
+		this.siblingNextNode = void 0;
+		this.siblingPrevNode = void 0;
+		return this;
+	}
+
+	detach() {
+		const oPrevNode = this.prevNode;
+		const oSibilingPrevNode = this.siblingPrevNode;
+		const oSibilingNextNode = this.siblingNextNode;
+
+		if (oPrevNode) {
+			oPrevNode.nextNode = oSibilingNextNode;
+		}
+		if (oSibilingPrevNode) {
+			oSibilingPrevNode.siblingNextNode = oSibilingNextNode;
+		}
+		if (oSibilingNextNode) {
+			oSibilingNextNode.siblingPrevNode = oSibilingPrevNode;
+			oSibilingNextNode.prevNode = oPrevNode;
+		}
+		if (this.parentNode) {
+			this.parentNode.childNodes = this.parentNode.childNodes.filter((node) => node !== this);
+		}
+
+		this.prevNode = void 0;
+		this.parentNode = void 0;
+		this.tail.nextNode = void 0;
+		this.siblingNextNode = void 0;
+		this.siblingPrevNode = void 0;
+
+		this.takeDetachCallbacks();
+
+		return this;
+	}
+
+	insertInto(left: TreeChainNode<Data> | null, right: TreeChainNode<Data> | null) {
+		const thisTail = this.tail;
+
+		const isSiblingHead = left === null && right !== null && right.siblingPrevNode === void 0;
+		const isSiblingTail = left !== null && right === null && left.siblingNextNode === void 0;
+		const isRightNextToLeft = left?.nextNode === right;
+		const isRightSiblingNextToLeft = left?.siblingNextNode === right;
+		const isLeftTheParentOfRight = right?.parentNode === left;
+		const isIndependentNode = !this.prevNode && !thisTail.nextNode;
+
+		if (!isIndependentNode) {
+			throw new Error(
+				ERROR_PREFIX + "This chain node is used to other chain, please detach."
+			);
+		}
+
+		if (isSiblingHead) {
+			this.parentNode = right.parentNode;
+			if (this.parentNode) {
+				this.prevNode = this.parentNode;
+				this.parentNode.childNodes.unshift(this);
+			}
+
+			right.prevNode = thisTail;
+			thisTail.nextNode = right;
+
+			right.siblingPrevNode = this;
+			this.siblingNextNode = right;
+		} else if (isSiblingTail) {
+			const leftTail = left.tail;
+
+			this.parentNode = left.parentNode;
+			if (this.parentNode) {
+				this.parentNode.childNodes.push(this);
+			}
+
+			leftTail.nextNode = this;
+			this.prevNode = leftTail;
+
+			left.siblingNextNode = this;
+			this.siblingPrevNode = left;
+		} else if (isRightNextToLeft && isRightSiblingNextToLeft) {
+			this.parentNode = left.parentNode;
+
+			if (this.parentNode) {
+				const index = this.parentNode.childNodes.findIndex((child) => child === left);
+				this.parentNode.childNodes.splice(index + 1, 0, this);
+			}
+
+			left.nextNode = this;
+			this.prevNode = left;
+
+			left.siblingNextNode = this;
+			this.siblingPrevNode = left;
+
+			right.prevNode = thisTail;
+			thisTail.nextNode = right;
+
+			right.siblingPrevNode = this;
+			this.siblingNextNode = right;
+		} else if (isRightNextToLeft && isLeftTheParentOfRight) {
+			this.parentNode = left;
+			this.parentNode.childNodes.unshift(this);
+
+			left.nextNode = this;
+			this.prevNode = left;
+
+			right.prevNode = thisTail;
+			thisTail.nextNode = right;
+
+			right.siblingPrevNode = this;
+			this.siblingNextNode = right;
+		} else if (isRightSiblingNextToLeft) {
+			this.parentNode = left.parentNode;
+
+			if (this.parentNode) {
+				const index = this.parentNode.childNodes.findIndex((child) => child === left);
+				this.parentNode.childNodes.splice(index + 1, 0, this);
+			}
+
+			const leftTail = left.tail;
+			leftTail.nextNode = this;
+			this.prevNode = leftTail;
+
+			left.siblingNextNode = this;
+			this.siblingPrevNode = left;
+
+			right.prevNode = thisTail;
+			thisTail.nextNode = right;
+
+			right.siblingPrevNode = this;
+			this.siblingNextNode = right;
+		} else if (isRightNextToLeft) {
+			this.parentNode = left.parentNode;
+
+			if (this.parentNode) {
+				this.parentNode.childNodes.push(this);
+			}
+
+			left.siblingNextNode = this;
+			this.siblingPrevNode = left;
+
+			const leftTail = left.tail;
+			leftTail.nextNode = this;
+			this.prevNode = leftTail;
+
+			right.prevNode = thisTail;
+			thisTail.nextNode = right;
+		} else {
+			throw new Error(
+				ERROR_PREFIX +
+					"Invalid insert because the left node is unrelated to the right node."
+			);
+		}
+
+		this.takeInsertCallbacks();
+
+		return this;
+	}
+
+	insertChild(node: TreeChainNode<Data>) {
+		if (!!this.childNodes.length) {
+			const right = this.childNodes[0];
+			return node.insertInto(this, right);
+		}
+
+		return this.addChildIfHasNoChildNodes(node);
+	}
+
+	addChild(node: TreeChainNode<Data>) {
+		if (!!this.childNodes.length) {
+			const left = this.childNodes[this.childNodes.length - 1];
+			return node.insertInto(left, null);
+		}
+
+		return this.addChildIfHasNoChildNodes(node);
+	}
+
+	addChildIfHasNoChildNodes(node: TreeChainNode<Data>) {
+		const nodeTail = node.tail;
+
+		if (node.prevNode || nodeTail.nextNode) {
+			throw new Error(
+				ERROR_PREFIX + "This chain node is used to other chain, please detach."
+			);
+		}
+
+		node.parentNode = this;
+		this.childNodes.push(node);
+
+		if (this.nextNode) {
+			this.nextNode.prevNode = nodeTail;
+			nodeTail.nextNode = this.nextNode;
+			this.nextNode = node;
+			node.prevNode = this;
+		} else {
+			this.nextNode = node;
+			node.prevNode = this;
+		}
+
+		this.takeInsertCallbacks();
+
+		return this;
+	}
+
+	destroy() {
+		const needDetach = !!this.prevNode || !!this.tail.nextNode;
+		if (needDetach) {
+			this.detach();
+		}
+		this._destroy();
+	}
+
+	protected _destroy() {
+		this.childNodes.forEach((child) => child._destroy());
+		this.data = null;
+		this.clean();
+		this.takeDestroyCallbacks();
+	}
+}
+
 export class TreeChain<Data extends CommonObject> {
-	dataKey: PropertyKey = "id";
-
-	childrenKey: PropertyKey = "children";
-
-	protected source: Data[] = [];
-
 	protected map: Map<PropertyKey, TreeChainNode<Data>> = new Map();
 
 	get chain() {
+		if (this._chain === null) {
+			throw new Error(ERROR_PREFIX + "Empty chain.");
+		}
 		return this._chain;
 	}
 
-	constructor(protected _chain: TreeChainNode<Data>) {}
-
-	insertNodeToChain(node: TreeChainNode<Data>, key?: PropertyKey) {
-		const { tailNode, nodes } = TreeChain.getChainDetail(node);
-
-		const target = this.findNodeByKey(key);
-
-		if (target) {
-			const nextNodeOfTarget = target.nextNode;
-			target.nextNode = node;
-			tailNode.nextNode = nextNodeOfTarget;
-			node.siblingNode = nextNodeOfTarget;
-			node.parentNode = target.parentNode;
-			node.prevNode = target;
-			node.isLeaf = !!node.children?.length;
-		} else {
-			const thisHead = this.chain;
-			node.parentNode = void 0;
-			node.prevNode = void 0;
-			node.siblingNode = thisHead;
-			node.isLeaf = !!node.children?.length;
-			tailNode.nextNode = thisHead;
-			thisHead.prevNode = tailNode;
-		}
-
-		nodes.forEach((node) => this.map.set(node.key, node));
+	protected _topLevelNodes: TreeChainNode<Data>[] = [];
+	get topLevelNodes() {
+		this._topLevelNodes.length = 0;
+		this._topLevelNodes.push(...this.getNodesByLevel());
+		return this._topLevelNodes;
 	}
 
-	deleteNodeFromChain(key: PropertyKey) {
+	constructor(protected _chain: TreeChainNode<Data> | null) {}
+
+	protected beforeInsertNode(node: TreeChainNode<Data>) {
+		const keyDuplicated = node.includeNodes.find((includeNode) =>
+			this.map.has(includeNode.key)
+		);
+
+		if (keyDuplicated) {
+			throw new Error(
+				ERROR_PREFIX +
+					`The key of the inserted node \`${String(
+						keyDuplicated.key
+					)}\` already exists in the chain.`
+			);
+		}
+	}
+
+	protected afterInsertNode(node: TreeChainNode<Data>) {
+		node.includeNodes.forEach((includeNode) => {
+			this.map.set(includeNode.key, includeNode);
+		});
+
+		if (node.siblingNextNode === this._chain) {
+			this._chain = node;
+		}
+	}
+
+	protected beforeDetachNode(node: TreeChainNode<Data>) {
+		if (node.key === this._chain?.key) {
+			this._chain = node.siblingNextNode || null;
+		}
+	}
+
+	protected afterDetachNode(node: TreeChainNode<Data>) {
+		node.includeNodes.forEach((includeNode) => {
+			this.map.delete(includeNode.key);
+		});
+	}
+
+	insertNodeIntoHead(node: TreeChainNode<Data>) {
+		this.beforeInsertNode(node);
+		node.insertInto(null, this.chain);
+		this.afterInsertNode(node);
+		return this;
+	}
+
+	/**
+	 *
+	 * @param node The node which will be inserted to chain
+	 * @param target The target node as the inserting location
+	 * @param isTargetChild When set to true, the node will insert to the child nodes of the target node. Default is false.
+	 */
+	insertNodeIntoTarget(
+		node: TreeChainNode<Data>,
+		target: TreeChainNode<Data>,
+		isTargetChild = false
+	) {
+		this.beforeInsertNode(node);
+
+		if (isTargetChild) {
+			target.insertChild(node);
+		} else {
+			node.insertInto(target, target.siblingNextNode || null);
+		}
+
+		this.afterInsertNode(node);
+
+		return this;
+	}
+
+	insertNodeByKey(node: TreeChainNode<Data>, key: PropertyKey, isTargetChild = false) {
+		const target = this.findNodeByKey(key);
+		if (!target) {
+			this.insertNodeIntoHead(node);
+		} else {
+			this.insertNodeIntoTarget(node, target, isTargetChild);
+		}
+		return this;
+	}
+
+	deleteNode(node: TreeChainNode<Data>) {
+		this.beforeDetachNode(node);
+		node.detach();
+		this.afterDetachNode(node);
+		node.destroy();
+		return this;
+	}
+
+	deleteNodeByKey(key: PropertyKey) {
 		const target = this.findNodeByKey(key);
 
-		if (!target) return;
+		if (!target) return this;
 
-		const { keys, tailNode, siblingNodes } = TreeChain.getChainDetail(target);
+		return this.deleteNode(target);
+	}
 
-		const prevNode = target.prevNode;
+	moveNode(from: TreeChainNode<Data>, to: TreeChainNode<Data>, isTargetChild = false) {
+		const cache = this.map;
 
-		const nextNode = tailNode.nextNode;
-
-		let siblingNode = target.siblingNode;
-
-		const prevSiblingNode = siblingNodes.find((node) => node.siblingNode === target);
-
-		if (prevSiblingNode) {
-			prevSiblingNode.siblingNode = siblingNode;
+		if (!cache.has(from.key)) {
+			throw new Error(
+				ERROR_PREFIX + `Can not find a node which key is \`${String(from.key)}\``
+			);
+		}
+		if (!cache.has(to.key)) {
+			throw new Error(
+				ERROR_PREFIX + `Can not find a node which key is \`${String(to.key)}\``
+			);
 		}
 
-		if (prevNode) {
-			prevNode.nextNode = nextNode;
+		if (from.includeNodes.includes(to)) {
+			throw new Error(ERROR_PREFIX + `Can not move a node to its children.`);
 		}
 
-		keys.forEach((key) => this.map.delete(key));
+		this.beforeDetachNode(from);
+		from.detach();
+		this.afterDetachNode(from);
+		this.insertNodeIntoTarget(from, to, isTargetChild);
+	}
+
+	moveNodeByKey(fromKey: PropertyKey, toKey: PropertyKey, isTargetChild = false) {
+		const from = this.findNodeByKey(fromKey);
+
+		const to = this.findNodeByKey(toKey);
+
+		if (!from) {
+			throw new Error(
+				ERROR_PREFIX + `Can not find a node which key is \`${String(fromKey)}\``
+			);
+		}
+
+		if (!to) {
+			throw new Error(ERROR_PREFIX + `Can not find a node which key is \`${String(toKey)}\``);
+		}
+
+		return this.moveNode(from, to, isTargetChild);
 	}
 
 	getNodesByLevel(level: number = 0) {
-		let LevelNodes: TreeChainNode<Data>[] = [];
+		let head = this.chain;
+		let levelNodes: TreeChainNode<Data>[] = [head];
+		let currentLevel = 0;
 
-		let head: TreeChainNode<Data> | undefined = this.chain;
-
-		while (head) {
-			LevelNodes.push(head);
-			head = head.siblingNode;
+		while (head.siblingNextNode) {
+			levelNodes.push(head.siblingNextNode);
+			head = head.siblingNextNode;
 		}
 
-		if (!level) {
-			return LevelNodes;
-		}
-
-		let count = 0;
-
-		while (count < level) {
-			count++;
-
-			LevelNodes = LevelNodes.reduce((nodes, current) => {
-				nodes.push(...(current.children ?? []));
-				return nodes;
+		function getNextLevelNodes(currentLevelNodes: TreeChainNode<Data>[]) {
+			return currentLevelNodes.reduce((result, current) => {
+				result.push(...current.childNodes);
+				return result;
 			}, [] as TreeChainNode<Data>[]);
 		}
 
-		return LevelNodes;
+		while (currentLevel < level) {
+			levelNodes = getNextLevelNodes(levelNodes);
+			currentLevel++;
+		}
+
+		return levelNodes;
 	}
 
 	each(callback: (node: TreeChainNode<Data>) => false | void) {
-		return TreeChain.eachNode(this.chain, callback);
+		return TreeChain.eachChain(this.chain, callback);
 	}
 
-	findNodeByKey(key?: PropertyKey) {
-		if (!key) return;
+	findNodeByKey(key: PropertyKey) {
 		return this.map.get(key);
 	}
 
 	toArray(config?: ConfigToArray<Data>) {
-		const { filter, sort, area } = config ?? {};
+		const { filter, sort, startKey, count = Infinity } = config ?? {};
 
 		const result: TreeChainNode<Data>[] = [];
 
 		let head: TreeChainNode<Data> | undefined = this.chain;
-		let count = 0;
+		let save = 1;
 
-		if (area) {
-			const { key } = area;
-			head = this.findNodeByKey(key);
+		if (startKey) {
+			const target = this.findNodeByKey(startKey);
+			if (target) {
+				head = target;
+			}
 		}
 
 		while (!!head) {
-			if (area?.count && count >= area.count) break;
+			if (save > count) break;
 			if (typeof filter === "function" && !filter.call(this, head)) {
-				head = head.siblingNode;
+				head = head.tail.nextNode;
 			} else {
 				result.push(head);
 				head = head.nextNode;
-				count++;
+				save++;
 			}
 		}
 
 		if (typeof sort !== "undefined") {
-			result.sort((a, b) => {
-				if (a.parentNode === b) {
-					return 1;
+			function getMark(node: TreeChainNode<Data>): PropertyKey[] {
+				return node.parentNode ? [...getMark(node.parentNode), node.key] : [node.key];
+			}
+
+			function isSameMarkPrefix(markA: PropertyKey[], markB: PropertyKey[]) {
+				if (markA.length !== markB.length) return false;
+				return markA.every((key, index) => {
+					if (index === markA.length - 1) return true;
+					return markB[index] === key;
+				});
+			}
+
+			function isMarkAPrefixMarkB(markA: PropertyKey[], markB: PropertyKey[]) {
+				if (markA.length >= markB.length) return false;
+				return markA.every((key, index) => {
+					return markB[index] === key;
+				});
+			}
+
+			const markMap = result.reduce((data, cur) => {
+				const mark = getMark(cur);
+				data.set(cur, mark);
+				return data;
+			}, new WeakMap<TreeChainNode<Data>, PropertyKey[]>());
+
+			result.sort((nodeA, nodeB) => {
+				const markA = markMap.get(nodeA)!;
+				const markB = markMap.get(nodeB)!;
+
+				if (isSameMarkPrefix(markA, markB)) {
+					return sort.call(this, nodeA, nodeB);
 				}
-				if (b.parentNode === a) {
+				if (isMarkAPrefixMarkB(markA, markB)) {
 					return -1;
 				}
-				if (a.parentNode === b.parentNode) {
-					return sort.call(this, a, b);
+				if (isMarkAPrefixMarkB(markB, markA)) {
+					return 1;
 				}
-				return 0;
+				return sort.call(this, nodeA, nodeB);
 			});
 		}
 
 		return result;
 	}
 
-	cloneSelf() {
-		const chain = TreeChain.clone(this.chain);
+	static create<T extends CommonObject>(source: T[], config?: ConfigCreateTreeChain) {
+		const { chain, map } = this.createTreeChain(source, config);
 
-		chain.source = this.source;
+		const result = new TreeChain(chain);
 
-		chain.map = new Map(this.map);
+		result.map = map;
 
-		return chain;
+		return result;
 	}
 
-	static create<T extends CommonObject>(source: T[], config?: ConfigCreateTreeChain) {
+	static createTreeChain<T extends CommonObject>(source: T[], config?: ConfigCreateTreeChain) {
+		if (!Array.isArray(source) || source.length === 0) {
+			throw new Error(ERROR_PREFIX + "Empty source data.");
+		}
+
 		const conf = Object.assign(
-			DEFAULT_CONFIGCREATE,
+			{ ...DEFAULT_CONFIGCREATE },
 			config ?? {}
 		) as Required<ConfigCreateTreeChain>;
 
 		const { childrenKey, dataKey } = conf;
 
-		let cloned = [...source];
-
 		const map = new Map<PropertyKey, TreeChainNode<T>>();
 
-		let head: TreeChainNode<T> | undefined;
+		let cloned = [...source];
+
+		const headKey = cloned[0][dataKey];
+
 		let prevNode: TreeChainNode<T> | undefined;
 
 		recurse(cloned, childrenKey, (data, index, parent) => {
 			const parentNode = parent === void 0 ? void 0 : map.get(parent[dataKey]);
-			const currentNode = TreeChain.createTreeChainNode(
-				data,
-				dataKey,
-				childrenKey,
-				parentNode,
-				void 0,
-				prevNode
-			);
+
+			const parentChildren = parent ? parent[childrenKey] : cloned;
+
+			const siblingPrevNode =
+				index === 0 ? void 0 : map.get(parentChildren[index - 1][dataKey]);
+
+			const currentNode = new TreeChainNode<T>(data, dataKey);
+
+			if (map.get(currentNode.key)) {
+				throw new Error(ERROR_PREFIX + "Exists duplicated data key.");
+			}
+
 			map.set(currentNode.key, currentNode);
 
-			const siblingData =
-				parent === void 0 ? cloned[index - 1] : parent[childrenKey][index - 1];
-
-			if (siblingData) {
-				const siblingNode = map.get(siblingData[dataKey]);
-				if (siblingNode) {
-					siblingNode.siblingNode = currentNode;
-				}
-			}
-
 			if (parentNode) {
-				Array.isArray(parentNode.children)
-					? parentNode.children.push(currentNode)
-					: (parentNode.children = [currentNode]);
+				currentNode.parentNode = parentNode;
+				parentNode.childNodes.push(currentNode);
 			}
 
-			if (!head) {
-				head = currentNode;
+			if (siblingPrevNode) {
+				siblingPrevNode.siblingNextNode = currentNode;
+				currentNode.siblingPrevNode = siblingPrevNode;
 			}
 
 			if (prevNode) {
 				prevNode.nextNode = currentNode;
+				currentNode.prevNode = prevNode;
 			}
 
 			prevNode = currentNode;
 		});
 
-		if (!head)
-			throw new Error(
-				ERROR_PREFIX + "Failed to create tree train, please check data and keys"
-			);
+		const headNode = map.get(headKey)!;
 
-		const chain = new TreeChain<T>(head);
-
-		chain.source = source;
-
-		chain.map = map;
-
-		return chain;
+		return { chain: headNode, map };
 	}
 
-	static createTreeChainNode<T extends CommonObject>(
-		data: T,
-		dataKey: keyof T,
-		childrenKey: keyof T,
-		parent?: TreeChainNode<T>,
-		sibling?: TreeChainNode<T>,
-		prev?: TreeChainNode<T>,
-		next?: TreeChainNode<T>
-	): TreeChainNode<T> {
-		if (!isPropertyKey(dataKey))
-			throw new Error(ERROR_PREFIX + `Invalid key "${String(dataKey)}" in data.`);
-		if (!isPropertyKey(childrenKey))
-			throw new Error(
-				ERROR_PREFIX + `Invalid key "${String(childrenKey)}" for children in data.`
-			);
-
-		const children = data[childrenKey];
-
-		return {
-			key: data[dataKey],
-			source: data,
-			parentNode: parent,
-			siblingNode: sibling,
-			prevNode: prev,
-			nextNode: next,
-			isLeaf: Array.isArray(children) && children.length !== 0,
-			children: [],
-		};
+	static createTreeChainNode<T extends CommonObject>(source: T, config?: ConfigCreateTreeChain) {
+		return TreeChain.createTreeChain([source], config).chain;
 	}
 
-	static clone<T extends CommonObject>(topNode: TreeChainNode<T>) {
-		let head: TreeChainNode<T> | undefined = topNode;
-		let cloned: TreeChainNode<T> | undefined = { ...topNode };
-		while (head) {
-			const next = topNode.nextNode;
-			if (next) {
-				cloned.nextNode = { ...next };
-			}
-			head = next;
-		}
-
-		if (!head) {
-			throw new Error(ERROR_PREFIX + "Never init.");
-		}
-
-		return new TreeChain<T>(head);
-	}
-
-	static findNodeByKeyFromChain(key: PropertyKey, topNode: TreeChainNode<any>) {
-		let head: TreeChainNode<any> | undefined = topNode;
+	static findNodeByKeyFromChain(key: PropertyKey, chain: TreeChain<any>) {
+		let head: TreeChainNode<any> | undefined = chain.chain;
 		while (head) {
 			if (head.key === key) return head;
 			head = head.nextNode;
 		}
+
+		return head;
 	}
 
-	static eachNode<T extends CommonObject>(
+	static eachChain<T extends CommonObject>(
 		node: TreeChainNode<T>,
 		callback: (node: TreeChainNode<T>) => false | void
 	) {
@@ -345,57 +711,19 @@ export class TreeChain<Data extends CommonObject> {
 		return this;
 	}
 
-	static getTopNodeOfTreeChain<T extends CommonObject>(
-		chain: TreeChainNode<T>
+	static getTreeChainHeadByNode<T extends CommonObject>(
+		node: TreeChainNode<T>
 	): TreeChainNode<T> {
-		let topNode: TreeChainNode<T> = chain;
+		let headNode: TreeChainNode<T> = node;
 
-		while (topNode.prevNode || topNode.parentNode) {
-			if (topNode.parentNode) {
-				topNode = topNode.parentNode;
-			}
-			if (topNode.prevNode) {
-				topNode = topNode.prevNode;
-			}
-		}
-
-		return topNode;
-	}
-
-	static getChainDetail<T extends CommonObject>(chain: TreeChainNode<T>): TreeChainDetail<T> {
-		let keys: PropertyKey[] = [];
-		let nodes: TreeChainNode<T>[] = [];
-		let map: Map<PropertyKey, TreeChainNode<T>> = new Map();
-		let current = chain;
-
-		TreeChain.eachNode(chain, (node) => {
-			nodes.push(node);
-			keys.push(node.key);
-			current = node;
-			map.set(node.key, node);
-		});
-
-		let siblingNodes: TreeChainNode<T>[] = [];
-
-		const topNode = TreeChain.getTopNodeOfTreeChain(chain);
-
-		if (!!chain.parentNode) {
-			siblingNodes = chain.parentNode.children!;
-		} else {
-			let head: TreeChainNode<T> | undefined = topNode;
-			while (head) {
-				siblingNodes.push(head);
-				head = chain.siblingNode;
+		while (headNode.prevNode || headNode.parentNode) {
+			if (headNode.parentNode) {
+				headNode = headNode.parentNode;
+			} else if (headNode.prevNode) {
+				headNode = headNode.prevNode;
 			}
 		}
 
-		return {
-			keys,
-			nodes,
-			topNode,
-			tailNode: current,
-			siblingNodes,
-			map,
-		};
+		return headNode;
 	}
 }
