@@ -19,6 +19,8 @@ type FilterFn<Data extends CommonObject> = (data: TreeChainNode<Data>) => boolea
 
 export interface ConfigToArray<Data extends CommonObject> {
 	filter?: FilterFn<Data>;
+	keepAncestorsWithChildren?: boolean;
+	keepParentWithoutChildren?: boolean;
 	sort?: SortFn<Data>;
 	startKey?: PropertyKey;
 	count?: number;
@@ -55,6 +57,25 @@ export class TreeChainNode<Data extends CommonObject> {
 		});
 
 		return this._includeNodes;
+	}
+
+	protected _ancestors: TreeChainNode<Data>[] = [];
+	get ancestors() {
+		this._ancestors.length = 0;
+		this.eachParent((ancestor) => {
+			this._ancestors.push(ancestor);
+		});
+		return this._ancestors;
+	}
+
+	get firstAncestor() {
+		const length = this._ancestors.length;
+		if (length > 0 && this._ancestors[length - 1].parentNode === void 0) {
+			return this._ancestors[length - 1];
+		} else {
+			const ancestors = this.ancestors;
+			return ancestors[ancestors.length - 1];
+		}
 	}
 
 	get tail() {
@@ -118,11 +139,7 @@ export class TreeChainNode<Data extends CommonObject> {
 	}
 
 	each(
-		callback: (
-			node: TreeChainNode<Data>,
-			index: number,
-			parent?: TreeChainNode<Data>
-		) => false | void
+		callback: (node: TreeChainNode<Data>, index: number, parent?: TreeChainNode<Data>) => void
 	) {
 		const node = this as TreeChainNode<Data>;
 		recurse([node], "childNodes", (_node, index, parent, native) =>
@@ -130,6 +147,15 @@ export class TreeChainNode<Data extends CommonObject> {
 		);
 
 		return this;
+	}
+
+	eachParent(callback: (node: TreeChainNode<Data>) => void) {
+		let parent = this.parentNode;
+
+		while (parent) {
+			callback(parent);
+			parent = parent.parentNode;
+		}
 	}
 
 	clean() {
@@ -542,12 +568,51 @@ export class TreeChain<Data extends CommonObject> {
 	}
 
 	toArray(config?: ConfigToArray<Data>) {
-		const { filter, sort, startKey, count = Infinity } = config ?? {};
+		const {
+			filter,
+			sort,
+			startKey,
+			keepAncestorsWithChildren = false,
+			keepParentWithoutChildren = true,
+			count = Infinity,
+		} = config ?? {};
 
 		const result: TreeChainNode<Data>[] = [];
 
 		let head: TreeChainNode<Data> | undefined = this.chain;
-		let save = 1;
+
+		const filterCache = new WeakMap<TreeChainNode<Data>, boolean>();
+		const withFilter = typeof filter === "function";
+
+		const enhanceFilter = (node: TreeChainNode<Data>) => {
+			if (!withFilter) return true;
+			if (filterCache.has(node)) {
+				return filterCache.get(node);
+			}
+			if (keepAncestorsWithChildren || !keepParentWithoutChildren) {
+				const nodeIncludes = [...node.includeNodes].reverse();
+				nodeIncludes.forEach((includeNode) => {
+					if (includeNode.leaf) {
+						filterCache.set(includeNode, !!filter.call(this, includeNode));
+					} else {
+						const isChildrenAllBeFiltered = includeNode.childNodes.every(
+							(child) => filterCache.get(child) === false
+						);
+						if (isChildrenAllBeFiltered && !keepParentWithoutChildren) {
+							filterCache.set(includeNode, false);
+						} else if (!isChildrenAllBeFiltered && keepAncestorsWithChildren) {
+							filterCache.set(includeNode, true);
+						} else {
+							filterCache.set(includeNode, !!filter.call(this, includeNode));
+						}
+					}
+				});
+				return filterCache.get(node);
+			}
+			const result = !!filter.call(this, node);
+			filterCache.set(node, result);
+			return result;
+		};
 
 		if (startKey) {
 			const target = this.findNodeByKey(startKey);
@@ -557,14 +622,19 @@ export class TreeChain<Data extends CommonObject> {
 		}
 
 		while (!!head) {
-			if (save > count) break;
-			if (typeof filter === "function" && !filter.call(this, head)) {
-				head = head.tail.nextNode;
-			} else {
-				result.push(head);
-				head = head.nextNode;
-				save++;
+			if (result.length >= count) break;
+
+			if (withFilter) {
+				const filterResult = enhanceFilter.call(this, head);
+
+				if (!filterResult) {
+					head = head.tail.nextNode;
+					continue;
+				}
 			}
+
+			result.push(head);
+			head = head.nextNode;
 		}
 
 		if (typeof sort !== "undefined") {
