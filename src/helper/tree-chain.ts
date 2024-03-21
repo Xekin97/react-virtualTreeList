@@ -380,7 +380,16 @@ export class TreeChainNode<Data extends CommonObject> {
 }
 
 export class TreeChain<Data extends CommonObject> {
-	protected map: Map<PropertyKey, TreeChainNode<Data>> = new Map();
+	protected _map: Map<PropertyKey, TreeChainNode<Data>> = new Map();
+	get map(): Map<PropertyKey, TreeChainNode<Data>> {
+		if (this._map.size) return this._map;
+		const map = new Map();
+		TreeChain.eachChain(this.chain, (node) => {
+			map.set(node.key, node);
+		});
+		this._map = map;
+		return map;
+	}
 
 	get chain() {
 		if (this._chain === null) {
@@ -688,7 +697,7 @@ export class TreeChain<Data extends CommonObject> {
 
 		const result = new TreeChain(chain);
 
-		result.map = map;
+		result._map = map;
 
 		return result;
 	}

@@ -95,6 +95,18 @@ describe("test tree chain node", () => {
 		expect(treeChainNode2.tail.key).toBe(13);
 	});
 
+	test("ancestor nodes", () => {
+		expect(
+			treeChainNode1.nextNode?.nextNode?.nextNode?.ancestors
+				.map((node) => node.key)
+				.toString()
+		).toBe("5,4,3");
+	});
+
+	test("first ancestor", () => {
+		expect(treeChainNode1.nextNode?.nextNode?.nextNode?.firstAncestor.key).toBe(3);
+	});
+
 	test("include nodes", () => {
 		expect(treeChainNode1.includeNodes.length).toBe(10);
 		expect(treeChainNode2.includeNodes.length).toBe(1);
@@ -191,6 +203,21 @@ describe("test tree chain", () => {
 
 describe("test to handle tree chain", () => {
 	const treeChain = TreeChain.create(simpleCloneDatas(MOCK_DATA));
+
+	test("delete and insert node", () => {
+		treeChain.deleteNodeByKey(3);
+
+		expect(treeChain.topLevelNodes.length).toBe(2);
+
+		const node = TreeChain.createTreeChainNode(MOCK_DATA[1]);
+
+		treeChain.insertNodeByKey(node, 0);
+
+		expect(treeChain.topLevelNodes.length).toBe(3);
+
+		expect(treeChain.map.get(0)?.siblingNextNode?.key).toBe(3);
+		expect(treeChain.map.get(13)?.siblingPrevNode?.key).toBe(3);
+	});
 
 	test("delete and insert head node", () => {
 		// delete
